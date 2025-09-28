@@ -79,51 +79,62 @@ export default function World() {
   const updatePlayer = useStore((s) => s.updatePlayer);
 
   useEffect(() => {
+    // Only run client-side
+    if (typeof window === "undefined") return;
+
     const name = localStorage.getItem("playerName") || `Guest-${Math.floor(Math.random() * 1000)}`;
     const color = localStorage.getItem("playerColor") || "#ff4d4f";
 
-    // Connect (use env or default to http://localhost:3001)
+    // build socket URL: prefer env var, fallback to same host:3001
     const socketUrl =
-      typeof window !== "undefined" && process.env.NEXT_PUBLIC_SOCKET_URL
-        ? process.env.NEXT_PUBLIC_SOCKET_URL
-        : (typeof window !== "undefined" ? (location.protocol + '//' + location.hostname + ':3001') : "http://localhost:3001");
+      (process.env.NEXT_PUBLIC_SOCKET_URL && process.env.NEXT_PUBLIC_SOCKET_URL.trim()) ||
+      `${location.protocol}//${location.hostname}:3001`;
 
-    socket = io(socketUrl, { transports: ["websocket"] });
+    // Use polling first so we can detect whether websocket upgrade is the problem
+    socket = io(socketUrl, {
+      path: "/socket.io",                    // explicitly set path (no trailing slash)
+      transports: ["polling", "websocket"],  // start with polling, then upgrade
+      upgrade: true,
+      secure: true,
+      timeout: 10000,
+      reconnectionAttempts: 5
+    });
+
+    // Client-side diagnostics
+    socket.on("connect", () => console.log("socket connected ->", socket.id));
+    socket.on("connect_error", (err: any) => console.error("client connect_error:", err && err.message ? err.message : err));
+    socket.on("error", (err: any) => console.error("client error:", err));
+    socket.on("reconnect_attempt", () => console.log("reconnect attempt"));
 
     socket.on("connect", () => {
       socket.emit("join", { name, color });
     });
 
-    // full players list
     socket.on("players", (playersObj: Record<string, Player>) => {
       setPlayers(playersObj);
     });
 
-    // a new player joined
     socket.on("playerJoined", (p: Player) => {
       updatePlayer(p);
     });
 
-    // a player moved
     socket.on("playerMoved", (p: Player) => {
       updatePlayer(p);
     });
 
-    // player left -> create a copy of current players and remove the id, then set
     socket.on("playerLeft", (id: string) => {
       const currentPlayers = useStore.getState().players;
-      if (!currentPlayers || !currentPlayers[id]) {
-        // nothing to do
-        return;
-      }
+      if (!currentPlayers || !currentPlayers[id]) return;
       const copy: Record<string, Player> = { ...currentPlayers };
       delete copy[id];
       setPlayers(copy);
     });
 
     return () => {
-      if (socket) socket.disconnect();
-      socket = null;
+      if (socket) {
+        socket.disconnect();
+        socket = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
